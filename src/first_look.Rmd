@@ -1,0 +1,494 @@
+---
+title: "First look"
+author: "Danielle Reimanis"
+date: "7/14/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(lubridate)
+library(ggthemes)
+library(ggpubr)
+library(ggplot2)
+library(stringr)
+library(purrr)
+library(xts)
+library(dygraphs)
+library(hms)
+library(RNRCS)
+library(hydroGOF)
+library(wesanderson)
+
+setwd("~/Desktop/Albedo Analysis/campass")
+```
+
+### Reading Data
+```{r}
+
+list.files("./data", full.names = T)
+
+jwburn_met_composite <- read_csv("./data/jwburn_met_composite.csv")
+mtcampus_met_composite <- read_csv("./data/mtcampus_met_composite.csv")
+mtcampus_met_composite_forR <- read_csv("./data/mtcampus_met_composite_forR.csv")
+tunnel_met_composite <- read_csv("./data/tunnel_met_composite.csv")
+
+
+```
+
+### Joe Wright
+```{r}
+
+names(jwburn_met_composite)
+str(jwburn_met_composite)
+
+jwburn_met_composite$datetime_mst <- mdy_hm(jwburn_met_composite$datetime_mst)
+
+ggplot(jwburn_met_composite, aes(x=datetime_mst, y=DBTCDT_Avg))+
+  geom_line()
+
+```
+
+### JW SNOTEL
+```{r}
+
+# SNOTEL_meta <- grabNRCS.meta(ntwrks = "SNTL", cnvrt.elev = T)
+# SNOTEL_meta_CO <- SNOTEL_meta$SNTL%>%
+#   filter(state == "CO")%>%
+#   filter(site_name == "Joe Wright")
+# SNOTEL_meta_CO
+# 
+# JW_SNTL <- grabNRCS.data(network = 'SNTL', site_id  = '551',
+#                                timescale = 'hourly',
+#                                 DayBgn = '2021-01-01', DayEnd = '2021-06-15')
+# 
+# save(JW_SNTL, file = "data/JW_SNTL.Rdata")
+load(file = "data/JW_SNTL.Rdata")
+
+jw_sntl_clean <- JW_SNTL%>%
+  rename(datetime =1, Tobs_F = 2, Precip_in = 3, Ds_in = 4, SWE_in = 5)%>%
+  mutate(datetime= ymd_hm(datetime))%>%
+  mutate(ds_m = Ds_in/39.37)%>%
+  filter(ds_m < 2)%>%
+  mutate(date = date(datetime))%>%
+  mutate(hour = hour(datetime))%>%
+  mutate(filter = ifelse(date == "2021-05-30" & hour == 14, 1, 0))%>%
+  filter(!filter == 1)%>%
+  select(-filter)%>%
+  mutate(swe_mm = SWE_in*25.4,
+         density = ifelse(ds_m >0 & swe_mm >0, swe_mm/ds_m, 0))
+
+ggplot(jw_sntl_clean, aes(x=datetime, y=ds_m))+
+  geom_line()
+
+```
+
+### Depth Comparison
+```{r}
+
+sntl_depth <- jw_sntl_clean%>%
+  select(datetime, ds_m)%>%
+  rename(SNOTEL = 2)%>%
+  mutate(SNOTEL = round(SNOTEL, digits = 2),
+         SNOTEL = ifelse(datetime > "2021-06-08 11:00:00", 0, SNOTEL))
+
+jw_burn_depth <- jwburn_met_composite%>%
+  select(datetime_mst, DBTCDT_Avg)%>%
+  rename(JW_Burned = 2, datetime = 1)%>%
+  mutate(JW_Burned = round(JW_Burned, digits = 2))
+
+depth_long <- sntl_depth%>%
+  merge(., jw_burn_depth, all = T)%>%
+  gather(., key = "Site", value = "Depth", -datetime)
+
+ggplot(depth_long, aes(x=datetime, y=Depth, color = Site))+
+  geom_line()+
+  scale_color_manual(values = c("slateblue4", "antiquewhite4"))+
+  labs(x=element_blank(), y = "Depth (m)")+
+  theme_bw()+
+  theme(text = element_text(family = "Times New Roman", size = 17), legend.position = c(0.8,0.85),
+        legend.text = element_text(size = 14))
+
+```
+
+### Albedo First Look
+```{r}
+names(jwburn_met_composite)
+names(simple)
+
+simple <- jwburn_met_composite%>%
+  select(2, 10, 17, 18, 23)%>%
+  rename(datetime = 1, depth_m = 2, hkin = 3, hkout = 4, alb_avg = 5)%>%
+  mutate(depth_m = round(depth_m, 2))%>%
+  mutate(alb_raw = hkout/hkin)%>%
+  mutate(hour = hour(datetime),
+         date = date(datetime))%>%
+  filter(hour %in% c(10,11,12,13,14))
+
+ggplot(simple, aes(x=date))+
+  geom_line(aes(y=alb_avg), color = "red4", linetype = "dashed")+
+  geom_line(aes(y=alb_raw), color = "black")+
+  geom_line(aes(y=depth_m/3), color = "steelblue2")+
+  theme_bw()+
+  scale_y_continuous(name = "Albedo",
+                           sec.axis = sec_axis(~.*3, name = "Depth (m)"))+
+  facet_wrap(~hour, nrow=1)+
+  theme(text = element_text(size = 17.5, family = "Times New Roman"),
+              axis.text.y.right = element_text(colour="steelblue3"),
+              axis.title.y.right = element_text(colour="steelblue3"))+
+  xlab(element_blank())
+
+```
+
+### Temp Isolation
+```{r}
+temp_jwburn_long <- jwburn_met_composite%>%
+  select(2, 27,31,35,39,43,47)%>%
+  rename(datetime = 1, "T_0.5cm_Avg" = 2)%>%
+  gather(., key = "Height", value = "temp", -datetime)%>%
+  filter(!temp == "NaN")
+
+ggplot(temp_jwburn_long, aes(x=datetime, y=temp, color = Height))+
+  geom_point(aes(shape = Height))+
+  scale_color_manual(values = wes_palette(n=6, name = "BottleRocket1"))+
+  theme_bw()+
+  labs(y = "Temp (°C)", x = element_blank())
+
+```
+
+### DY Graph
+```{r}
+
+names(jwburn_met_composite)
+
+jw_xts <-jwburn_met_composite%>%
+  select(2, 5, 10, 17, 18, 23)%>%
+  rename(datetime = 1, Tavg_C = 2, depth_m = 3, hkin = 4, hkout = 5, alb_avg = 6)%>%
+  mutate(depth_m = round(depth_m, 2))%>%
+  mutate(alb_raw = hkout/hkin)%>%
+  dplyr::select(datetime, alb_avg, alb_raw)%>%
+  filter(alb_avg > 0 & alb_raw > 0)%>%
+  xts(., order.by = .$datetime)
+
+dygraph(jw_xts)
+
+```
+
+### Fresh Snow
+```{r}
+
+fresh_raw <-jwburn_met_composite%>%
+  select(2, 5, 10, 17, 18, 23)%>%
+  rename(datetime = 1, Tavg_C = 2, depth_m = 3, hkin = 4, hkout = 5, alb_avg = 6)%>%
+  mutate(depth_m = round(depth_m, 2))%>%
+  mutate(alb_raw = hkout/hkin)%>%
+  mutate(depth_diff = depth_m - lag(depth_m),
+         depth_diff = ifelse(is.na(depth_diff), 0, depth_diff))%>%
+  mutate(alb_diff = alb_raw - lag(alb_raw),
+         alb_diff = ifelse(is.na(alb_diff), 0, alb_diff))%>%
+  mutate(alb_tminus1 = lag(alb_raw),
+         alb_tminus1 = ifelse(is.na(alb_tminus1), 0, alb_tminus1))%>%
+  filter(depth_diff > 0 & alb_diff >0 )%>%
+  filter(hkin >0)
+  #filter(hour(datetime) %in% c(10,11,12,13,14))
+
+ggplot(fresh_raw, aes(x=depth_m, y=alb_raw))+
+  geom_point()
+
+```
+
+### Before Numbers
+```{r}
+starting_alb <- jwburn_met_composite%>%
+  select(2, 17, 18, 10)%>%
+  rename(datetime = 1, hkin = 2, hkout = 3, depth_m = 4)%>%
+  mutate(alb_raw = hkout/hkin)%>%
+  filter(hour(datetime) == 12)%>%
+  filter(month(datetime) == 1)%>%
+  filter(depth_m < 0.8)%>%
+  summarize(mean = mean(alb_raw))
+
+groun_alb <- jwburn_met_composite%>%
+  select(2, 17, 18, 10)%>%
+  rename(datetime = 1, hkin = 2, hkout = 3, depth_m = 4)%>%
+  mutate(alb_raw = hkout/hkin)%>%
+  filter(depth_m < 0.8)%>%
+  mutate(date = date(datetime))%>%
+  filter(datetime > "2021-05-27" & hour(datetime) == 12)%>%
+  summarize(mean = mean(alb_raw))
+groun_alb
+
+```
+
+
+### Attempt #1
+
+#### CLASS
+```{r}
+
+working_df <- jwburn_met_composite%>%
+  select(2, 5, 10, 17, 18, 23)%>%
+  rename(datetime = 1, Tavg_C = 2, depth_m = 3, hkin = 4, hkout = 5, alb_avg = 6)%>%
+  mutate(depth_m = round(depth_m, 2))%>%
+  mutate(date = date(datetime))%>%
+  mutate(depth_m = ifelse(date > "2021-05-26" & depth_m < 0.05, 0, depth_m))%>%
+  mutate(alb_raw = hkout/hkin)%>%
+  arrange(., datetime)%>%
+  mutate(depth_diff = depth_m - lag(depth_m),
+         depth_diff = ifelse(is.na(depth_diff), 0 , depth_diff),
+         depth_diff_pos = ifelse(depth_diff > 0, depth_diff, 0),
+         albedo_filt = ifelse(depth_m == 0, 0.10, NA),
+         albedo_vis = ifelse(depth_m == 0, 0.09, NA),
+         albedo_vis = ifelse(month(datetime) ==1 & depth_m == 0.76, 
+                             0.56, albedo_vis),
+         albedo_filt = ifelse(month(datetime) ==1 & depth_m == 0.76, 
+                              0.38, albedo_filt),
+         fresh =  ifelse(depth_diff > 0 & Tavg_C <= 3, NA,
+                  ifelse(depth_diff > 0.01 & Tavg_C > 3, NA, 0)),
+         vfs_albedo = ifelse(depth_m == 0, 0.1, NA),
+         vfs_albedo = ifelse(month(datetime) ==1 & depth_m == 0.76, 0.66, vfs_albedo),
+         reset_alb = ifelse(depth_diff_pos > 0, 0.84, NA),
+         reset_alb = ifelse(depth_m == 0, 0.1, reset_alb),
+         reset_alb = ifelse(month(datetime) ==1 & depth_m == 0.76, 0.66, reset_alb),
+         alb_min = ifelse(Tavg_C < 0, 0.7, 0.5),
+         LAP = 10)%>%
+  filter(!depth_m == "Nan" & !Tavg_C == "NaN")
+
+alb_vis <- working_df$albedo_vis
+alb_filt <- working_df$albedo_filt
+vfs_albedo <- working_df$vfs_albedo
+fresh <- working_df$fresh
+diff <- working_df$depth_diff_pos
+depth <- working_df$depth_m
+temp <- working_df$Tavg_C
+vrsg_alb <- working_df$reset_alb
+alb_min <- working_df$ lb_min
+LAP <- working_df$LAP
+    
+for(i in 1:nrow(working_df)){
+    if(is.na(vrsg_alb[i])){
+      vrsg_alb[i] = ((vrsg_alb[i-1] - alb_min[i])*exp(-0.01) + alb_min[i])
+    }
+  }
+      
+working_df$reset_alb <- vrsg_alb
+    
+ggplot(working_df%>%filter(hour(datetime) == 12)%>%select(datetime, reset_alb, alb_raw)%>%rename("CLASS" = 2, "Raw_JWburn" = 3)%>%gather(., key = "Key", value = "Albedo", -datetime), aes(x=datetime))+
+  geom_line(aes(y = Albedo, color = Key))+
+  scale_color_manual(values = wes_palette("Darjeeling2",n =2))+
+  theme_bw()+
+  theme(legend.position = c(0.3, 0.3), text = element_text(family = "Times New Roman", size =14))+
+  labs(x=element_blank(), color = element_blank(), y= "Solar Noon Albedo")+
+  ylim(c(0,1))
+
+
+```
+
+#### VFSA
+
+```{r}
+for(i in 1:nrow(working_df)){
+    if(is.na(vfs_albedo[i]) & is.na(fresh[i]) & temp[i] < 3){
+    
+     alb_vis[i] = 0.215 - 
+       0.245*diff[i] - 
+       0.001*depth[i] + 
+       0.864*vfs_albedo[i-1]
+ 
+     alb_filt[i] = 0.166 + 
+       0.641*diff[i] +
+       0.017*depth[i] + 
+       0.670*vfs_albedo[i-1]
+     
+     vfs_albedo[i] = -0.025 + 
+       0.486*alb_filt[i] + 
+       0.553*alb_vis[i]
+     
+     vfs_albedo[i] = ifelse(vfs_albedo[i] > 0.97, 0.97, vfs_albedo[i])
+     
+    }
+  
+    if(is.na(vfs_albedo[i]) & is.na(fresh[i]) & temp[i] >= 3){
+     
+      alb_vis[i] = -0.021 +
+        1.357*diff[i] -
+        0.011*depth[i] +
+        1.25*vfs_albedo[i-1] +
+        0.002*temp[i]-
+        0.004*LAP[i]
+    
+      alb_filt[i] = 0.210 + 
+        0.108*diff[i] +
+        0.012*depth[i] + 
+        0.584*vfs_albedo[i-1] -
+        0.006*temp[i]
+                          
+   vfs_albedo[i] = -0.025 + 
+       0.486*alb_filt[i] + 
+       0.553*alb_vis[i]
+   
+   vfs_albedo[i] = ifelse(vfs_albedo[i] > 0.97, 0.97, vfs_albedo[i])
+       
+  }else{if(is.na(vfs_albedo[i]) & fresh[i] == 0 & temp[i] < 3){
+    vfs_albedo[i] = (((vfs_albedo[i-1] - 0.2)*exp(-0.005))+0.2)
+    
+  }else{if(is.na(vfs_albedo[i]) & fresh[i] == 0 & temp[i] >= 3){
+    vfs_albedo[i] = (((vfs_albedo[i-1] - 0.2)*exp(-0.01))+0.2)}
+    }
+  }
+}
+
+working_df$vfs_albedo <- vfs_albedo
+working_df$albedo_vis <- alb_vis
+working_df$albedo_filt <- alb_filt
+```
+
+### Stats
+```{r}
+
+stats <- working_df%>%
+  filter(hour(datetime) %in% c(9,10,11,12,13,14,15,16))
+
+cor(stats$alb_raw, stats$vfs_albedo, method = "pearson")^2
+NSE(stats$alb_raw, stats$vfs_albedo)
+cor(stats$alb_raw, stats$reset_alb, method = "pearson")^2
+NSE(stats$alb_raw, stats$reset_alb)
+
+names(working_df)
+stats_long <- stats%>%
+  select(datetime, alb_raw, vfs_albedo, reset_alb)%>%
+  rename(VFSA = 3, CLASS = 4)%>%
+  gather(., key = "Model", value = "Albedo", -datetime, -alb_raw)
+
+ggplot(stats_long, aes(x=alb_raw, y=Albedo, color = Model))+
+  geom_point()+
+  #xlim(c(0,1))+
+  geom_abline()+
+  theme_bw()+
+  labs(x="Observed α", y= "Modeled α", color = element_blank(), subtitle= "JWBurn Met Station")+
+  scale_color_manual(values = c("red4", "cyan4"))+
+  theme(legend.position = c(0.76,0.3),text = element_text(family = "Times New Roman", size =14))
+
+ggplot(working_df%>%filter(hour(datetime) %in% c(10,11,12,13,14))%>%select(datetime, vfs_albedo, alb_raw, reset_alb)%>%rename("VFSA" = 2, "Raw_JWburn" = 3, "CLASS" = 4)%>%gather(., key = "Key", value = "Albedo", -datetime), aes(x=datetime))+
+  geom_line(aes(y = Albedo, color = Key, linetype = Key))+
+  scale_color_manual(values = c("red4", "black", "cyan4"))+
+  scale_linetype_manual(values = c("dotdash", "solid", "dashed"))+
+  theme_bw()+
+  theme(legend.position = c(0.88, 0.27), text = element_text(family = "Times New Roman", size =14))+
+  labs(x=element_blank(), color = element_blank(), linetype = element_blank(), y= "Albedo at Hour")+
+  ylim(c(0,1))+
+  facet_wrap(~hour(datetime), nrow= 1)
+      
+```
+
+<!-- Code template -->
+```{r}
+# sbspmodel <- function(snowyear){
+#       df <- new_df%>%
+#         filter(site == "SBSP")%>%
+#         filter(SY == snowyear)%>%
+#         select(datetime, date, hour, SY, DOSY, alb_unfilt, depth_m, Tavg_C, newdust)%>%
+#         mutate(depth_diff = depth_m - lag(depth_m),
+#                depth_diff = ifelse(is.na(depth_diff), 0 , depth_diff),
+#                depth_diff = round(depth_diff, digits = 2),
+#                depth_diff_pos = ifelse(depth_diff > 0, depth_diff, 0),
+#                albedo_filt = ifelse(depth_m == 0, 0.30, NA),
+#                albedo_vis = ifelse(depth_m == 0, 0.07, NA),
+#                fresh =  ifelse(depth_diff > 0 & Tavg_C <= 3, NA, 
+#                     ifelse(depth_diff > 0.01 & Tavg_C > 3, NA, 0)),
+#                albedo = ifelse(depth_m == 0, 0.2, NA),
+#                reset_alb = ifelse(depth_diff_pos > 0, 0.84, NA),
+#                reset_alb = ifelse(depth_m == 0, 0.2, reset_alb),
+#                alb_min = ifelse(Tavg_C < 0, 0.7, 0.5))
+#       
+# alb_vis <- df$albedo_vis
+# alb_filt <- df$albedo_filt
+# alb_model <- df$albedo
+# fresh <- df$fresh
+# diff <- df$depth_diff_pos
+# depth <- df$depth_m
+# temp <- df$Tavg_C
+# dust <- df$newdust
+# vrsg_alb <- df$reset_alb
+# alb_min <- df$ alb_min
+#       
+# for(i in 1:nrow(df)){
+#   if(is.na(vrsg_alb[i])){
+#     vrsg_alb[i] = ((vrsg_alb[i-1] - alb_min[i])*exp(-0.01) + alb_min[i])
+#   }
+# }
+#       
+#       df$reset_alb <- vrsg_alb
+#       
+#       for(i in 1:nrow(df)){
+#         if(is.na(alb_model[i]) & is.na(fresh[i]) & temp[i] < 3){
+#           
+#            alb_vis[i] = coef(lm_cool_vis)[1]+
+#                                 coef(lm_cool_vis)[2]*diff[i]+
+#                                 coef(lm_cool_vis)[3]*depth[i]+
+#                                 coef(lm_cool_vis)[4]*alb_model[i-1]
+#                                 #coef(lm_cool_vis)[5]*temp[i]+
+#                                 #coef(lm_cool_vis)[6]*dust[i]
+#            
+#            alb_filt[i] = coef(lm_cool_filt)[1]+
+#                                   coef(lm_cool_filt)[2]*diff[i]+
+#                                   coef(lm_cool_filt)[3]*depth[i]+
+#                                   coef(lm_cool_filt)[4]*alb_model[i-1]
+#                                   #coef(lm_cool_filt)[4]*temp[i]
+#            
+#            alb_model[i] = coef(lm_alb)[1]+
+#                                   coef(lm_alb)[2]*alb_filt[i]+
+#                                   coef(lm_alb)[3]*alb_vis[i]
+#            
+#            alb_model[i] = ifelse(alb_model[i] > 0.97, 0.97, alb_model[i])
+#            
+#         }
+#         if(is.na(alb_model[i]) & is.na(fresh[i]) & temp[i] >= 3){
+#            
+#           alb_vis[i] = coef(lm_warm_vis)[1]+
+#                                   coef(lm_warm_vis)[2]*diff[i]+
+#                                   coef(lm_warm_vis)[3]*alb_model[i-1]+
+#                                   coef(lm_warm_vis)[4]*temp[i]+
+#                                   coef(lm_warm_vis)[5]*dust[i]+
+#                                   coef(lm_warm_vis)[6]*depth[i]
+#           
+#           alb_filt[i] = coef(lm_warm_filt)[1]+
+#                                   coef(lm_warm_filt)[2]*diff[i]+
+#                                   coef(lm_warm_filt)[3]*alb_model[i-1]+
+#                                   coef(lm_warm_filt)[4]*temp[i]+
+#                                   coef(lm_warm_filt)[5]*depth[i]
+#           
+#          alb_model[i] = coef(lm_alb)[1]+
+#                                   coef(lm_alb)[2]*alb_filt[i]+
+#                                   coef(lm_alb)[3]*alb_vis[i]
+#          
+#          alb_model[i] = ifelse(alb_model[i] > 0.97, 0.97, alb_model[i])
+#              
+#         }else{if(is.na(alb_model[i]) & fresh[i] == 0 & temp[i] < 3){
+#           alb_model[i] = (((alb_model[i-1] - 0.2)*exp(-0.005))+0.2)
+#         }else{if(is.na(alb_model[i]) & fresh[i] == 0 & temp[i] >= 3){
+#           alb_model[i] = (((alb_model[i-1] - 0.2)*exp(-0.01))+0.2)}
+#           }
+#         }
+#       }
+#       
+#       df$albedo <- alb_model
+#       
+#   return(df)
+#       
+# }
+# SY = unique(new_df$SY)
+# SY = SY[!is.na(SY)]
+# SY = SY[!SY == "SY2005"]
+# SY = SY[!SY == "SY2012"]
+# sbsp_model <- map_dfr(SY, sbspmodel)
+
+```
+
+
